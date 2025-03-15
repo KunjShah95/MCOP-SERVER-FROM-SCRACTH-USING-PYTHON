@@ -1,10 +1,12 @@
 import json
 import uuid
 import datetime
+import os
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 from typing import Dict, Any, Callable
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
+import openai
 
 # --- Core MCP Classes ---
 class Tool:
@@ -78,7 +80,12 @@ security = HTTPBasic()
 # Initialize MCP instance
 mcp = MCP()
 
-# Predefined Tools (No dynamic registration anymore)
+# OpenAI API Key
+openai.api_key = os.environ.get("OPENAI_API_KEY")
+if not openai.api_key:
+    raise ValueError("OpenAI API key not found. Set the OPENAI_API_KEY environment variable.")
+
+# Predefined Tools
 def get_current_weather(location: str) -> str:
     return f"The weather in {location} is sunny with a temperature of 25°C."
 
@@ -103,28 +110,41 @@ async def call_tool(tool_id: str, data: Dict[str, Any], credentials: HTTPBasicCr
         raise HTTPException(status_code=401, detail="Incorrect credentials")
     return mcp.tool_call(tool_id, data)
 
-# Removed /register_tool endpoint.  Tools are now predefined.
-
-# --- LLM Integration Simulation ---
+# --- LLM Integration ---
 @app.get("/llm_request")
 async def llm_request(query: str):
-    """Simulates an LLM requesting tools."""
-    if "weather" in query.lower():
-        location = query.split("in ")[-1].strip()
-        tool_call_response = await call_tool("get_current_weather", {"location": location})
-        return {"response": tool_call_response}
-    elif "sum" in query.lower():
-        try:
-            parts = query.split("sum of ")
-            numbers = parts[1].split(" and ")
-            a = int(numbers[0])
-            b = int(numbers[1])
-            tool_call_response = await call_tool("calculate_sum", {"a": a, "b": b})
-            return {"response": tool_call_response}
-        except Exception as e:
-            return {"error": "Invalid query format"}
-    else:
-        return {"response": "I don't know how to handle that query."}
+    """Uses the LLM to determine which tool to call."""
+    try:
+        # Construct the prompt for the LLM
+        prompt = f"""You are a tool selector.  You have access to the following tools:
+        {json.dumps(mcp.tools_list())}
+
+        Given the user query, determine which tool to use and return the tool ID.
+        If no tool is appropriate, return "no_tool".
+
+        User Query: {query}
+        Tool ID:"""
+
+        # Call the OpenAI API
+        response = openai.Completion.create(
+            engine="text-davinci-003",  # Or another suitable engine
+            prompt=prompt,
+            max_tokens=50,
+            n=1,
+            stop=None,
+            temperature=0.0,  # Lower temperature for more deterministic results
+        )
+
+        tool_id = response.choices[0].text.strip().lower()
+
+        if tool_id == "no_tool":
+            return {"response": "No tool is appropriate for this query."}
+
+        # Call the tool
+        return await call_tool(tool_id, {})  # Assuming no input data for now
+
+    except Exception as e:
+        return {"error": f"LLM or tool call error: {str(e)}"}
 
 # --- Run the app ---
 if __name__ == "__main__":
